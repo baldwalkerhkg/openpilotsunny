@@ -4,14 +4,19 @@
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTextEdit>
+#include <set>
 
+#ifdef SUNNYPILOT
+#include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
+#define ElidedLabel ElidedLabelSP
+#else
 #include "selfdrive/ui/qt/widgets/controls.h"
+#endif
 #include "tools/cabana/binaryview.h"
 #include "tools/cabana/chart/chartswidget.h"
 #include "tools/cabana/historylog.h"
 #include "tools/cabana/signalview.h"
 
-class MainWindow;
 class EditMessageDialog : public QDialog {
 public:
   EditMessageDialog(const MessageId &msg_id, const QString &title, int size, QWidget *parent);
@@ -39,10 +44,10 @@ private:
   void showTabBarContextMenu(const QPoint &pt);
   void editMsg();
   void removeMsg();
-  void updateState(const QHash<MessageId, CanData> * msgs = nullptr);
+  void updateState(const std::set<MessageId> *msgs = nullptr);
 
   MessageId msg_id;
-  QLabel *time_label, *warning_icon, *warning_label;
+  QLabel *warning_icon, *warning_label;
   ElidedLabel *name_label;
   QWidget *warning_widget;
   TabBar *tabbar;

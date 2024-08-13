@@ -6,7 +6,8 @@
 #include <QGestureEvent>
 #include <QLabel>
 #include <QMap>
-#include <QMapboxGL>
+#include <QMapLibre/Map>
+#include <QMapLibre/Settings>
 #include <QMouseEvent>
 #include <QOpenGLWidget>
 #include <QPixmap>
@@ -19,7 +20,11 @@
 #include "cereal/messaging/messaging.h"
 #include "common/params.h"
 #include "common/util.h"
+#ifdef SUNNYPILOT
+#include "selfdrive/ui/sunnypilot/ui.h"
+#else
 #include "selfdrive/ui/ui.h"
+#endif
 #include "selfdrive/ui/qt/maps/map_eta.h"
 #include "selfdrive/ui/qt/maps/map_instructions.h"
 
@@ -27,19 +32,21 @@ class MapWindow : public QOpenGLWidget {
   Q_OBJECT
 
 public:
-  MapWindow(const QMapboxGLSettings &);
+  MapWindow(const QMapLibre::Settings &);
   ~MapWindow();
 
 private:
-  void initializeGL() final;
   void paintGL() final;
   void resizeGL(int w, int h) override;
 
-  QMapboxGLSettings m_settings;
-  QScopedPointer<QMapboxGL> m_map;
+protected:
+  void initializeGL() final;
+  QMapLibre::Settings m_settings;
+  QScopedPointer<QMapLibre::Map> m_map;
 
   void initLayers();
 
+protected:
   void mousePressEvent(QMouseEvent *ev) final;
   void mouseDoubleClickEvent(QMouseEvent *ev) final;
   void mouseMoveEvent(QMouseEvent *ev) final;
@@ -49,15 +56,18 @@ private:
   void pinchTriggered(QPinchGesture *gesture);
   void setError(const QString &err_str);
 
+protected:
   bool loaded_once = false;
+  bool prev_time_valid = true;
 
+protected:
   // Panning
   QPointF m_lastPos;
   int interaction_counter = 0;
 
   // Position
-  std::optional<QMapbox::Coordinate> last_valid_nav_dest;
-  std::optional<QMapbox::Coordinate> last_position;
+  std::optional<QMapLibre::Coordinate> last_valid_nav_dest;
+  std::optional<QMapLibre::Coordinate> last_position;
   std::optional<float> last_bearing;
   FirstOrderFilter velocity_filter;
   bool locationd_valid = false;
@@ -68,16 +78,11 @@ private:
   MapInstructions* map_instructions;
   MapETA* map_eta;
 
-  // Blue with normal nav, green when nav is input into the model
-  QColor getNavPathColor(bool nav_enabled) {
-    return nav_enabled ? QColor("#31ee73") : QColor("#31a1ee");
-  }
-
   void clearRoute();
   void updateDestinationMarker();
   uint64_t route_rcv_frame = 0;
 
-private slots:
+public slots:
   void updateState(const UIState &s);
 
 public slots:

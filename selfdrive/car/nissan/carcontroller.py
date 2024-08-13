@@ -1,27 +1,45 @@
 from cereal import car
+from openpilot.common.realtime import DT_CTRL
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import apply_std_steer_angle_limits
+from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.car.nissan import nissancan
 from openpilot.selfdrive.car.nissan.values import CAR, CarControllerParams
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 
 
-class CarController:
+class CarController(CarControllerBase):
   def __init__(self, dbc_name, CP, VM):
-    self.CP = CP
+    super().__init__(dbc_name, CP, VM)
     self.car_fingerprint = CP.carFingerprint
-    self.frame = 0
 
     self.lkas_max_torque = 0
     self.apply_angle_last = 0
 
     self.packer = CANPacker(dbc_name)
 
+    self.disengage_blink = 0.
+    self.lat_disengage_init = False
+    self.lat_active_last = False
+
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
+
+    lateral_paused = CS.madsEnabled and not CC.latActive
+    if CC.latActive:
+      self.lat_disengage_init = False
+    elif self.lat_active_last:
+      self.lat_disengage_init = True
+
+    if not self.lat_disengage_init:
+      self.disengage_blink = self.frame
+
+    blinking_icon = (self.frame - self.disengage_blink) * DT_CTRL < 1.0 if self.lat_disengage_init else False
+
+    self.lat_active_last = CC.latActive
 
     can_sends = []
 
@@ -50,23 +68,24 @@ class CarController:
 
     self.apply_angle_last = apply_angle
 
-    if self.CP.carFingerprint in (CAR.ROGUE, CAR.XTRAIL, CAR.ALTIMA) and pcm_cancel_cmd:
+    if self.CP.carFingerprint in (CAR.NISSAN_ROGUE, CAR.NISSAN_XTRAIL, CAR.NISSAN_ALTIMA) and pcm_cancel_cmd:
       can_sends.append(nissancan.create_acc_cancel_cmd(self.packer, self.car_fingerprint, CS.cruise_throttle_msg))
 
     # TODO: Find better way to cancel!
     # For some reason spamming the cancel button is unreliable on the Leaf
     # We now cancel by making propilot think the seatbelt is unlatched,
     # this generates a beep and a warning message every time you disengage
-    if self.CP.carFingerprint in (CAR.LEAF, CAR.LEAF_IC) and self.frame % 2 == 0:
+    if self.CP.carFingerprint in (CAR.NISSAN_LEAF, CAR.NISSAN_LEAF_IC) and self.frame % 2 == 0:
       can_sends.append(nissancan.create_cancel_msg(self.packer, CS.cancel_msg, pcm_cancel_cmd))
 
     can_sends.append(nissancan.create_steering_control(
       self.packer, apply_angle, self.frame, CC.latActive, self.lkas_max_torque))
 
     # Below are the HUD messages. We copy the stock message and modify
-    if self.CP.carFingerprint != CAR.ALTIMA:
+    if self.CP.carFingerprint != CAR.NISSAN_ALTIMA:
       if self.frame % 2 == 0:
-        can_sends.append(nissancan.create_lkas_hud_msg(self.packer, CS.lkas_hud_msg, CC.enabled, hud_control.leftLaneVisible, hud_control.rightLaneVisible,
+        can_sends.append(nissancan.create_lkas_hud_msg(self.packer, CS.lkas_hud_msg, CC.latActive, blinking_icon, lateral_paused,
+                                                       hud_control.leftLaneVisible, hud_control.rightLaneVisible,
                                                        hud_control.leftLaneDepart, hud_control.rightLaneDepart))
 
       if self.frame % 50 == 0:
@@ -74,7 +93,7 @@ class CarController:
           self.packer, CS.lkas_hud_info_msg, steer_hud_alert
         ))
 
-    new_actuators = actuators.copy()
+    new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = apply_angle
 
     self.frame += 1

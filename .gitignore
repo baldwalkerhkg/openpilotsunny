@@ -10,10 +10,11 @@ venv/
 .overlay_init
 .overlay_consistent
 .sconsign.dblite
-.vscode*
 model2.png
 a.out
 .hypothesis
+
+/docs_site/
 
 *.dylib
 *.DSYM
@@ -41,13 +42,15 @@ compile_commands.json
 compare_runtime*.html
 
 persist
-board/obj/
-selfdrive/boardd/boardd
+selfdrive/pandad/pandad
+cereal/services.h
+cereal/gen
+cereal/messaging/bridge
 selfdrive/logcatd/logcatd
 selfdrive/mapd/default_speeds_by_region.json
 system/proclogd/proclogd
-selfdrive/ui/_ui
 selfdrive/ui/translations/alerts_generated.h
+selfdrive/ui/translations/tmp
 selfdrive/test/longitudinal_maneuvers/out
 selfdrive/car/tests/cars_dump
 system/camerad/camerad
@@ -57,12 +60,8 @@ selfdrive/modeld/_navmodeld
 selfdrive/modeld/_dmonitoringmodeld
 /src/
 
-one
 notebooks
-xx
-yy
 hyperthneed
-panda_jungle
 provisioning
 
 .coverage*
@@ -78,6 +77,7 @@ comma*.sh
 
 selfdrive/modeld/thneed/compile
 selfdrive/modeld/models/*.thneed
+selfdrive/modeld/models/*.pkl
 
 *.bz2
 
@@ -87,3 +87,22 @@ build/
 
 poetry.toml
 Pipfile
+
+### VisualStudioCode ###
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+### VisualStudioCode Patch ###
+# Ignore all local history of files
+.history
+.ionide

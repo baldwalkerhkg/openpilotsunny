@@ -1,3 +1,9 @@
+from cereal import car
+from openpilot.selfdrive.car import make_can_msg
+
+SteerControlType = car.CarParams.SteerControlType
+
+
 def create_steer_command(packer, steer, steer_req):
   """Creates a CAN message for the Toyota Steer Command."""
 
@@ -9,15 +15,16 @@ def create_steer_command(packer, steer, steer_req):
   return packer.make_can_msg("STEERING_LKA", 0, values)
 
 
-def create_lta_steer_command(packer, steer_angle, steer_req, frame, setme_x64):
+def create_lta_steer_command(packer, steer_control_type, steer_angle, steer_req, frame, torque_wind_down):
   """Creates a CAN message for the Toyota LTA Steer Command."""
 
   values = {
     "COUNTER": frame + 128,
-    "SETME_X1": 1,
-    "SETME_X3": 3,
+    "SETME_X1": 1,  # suspected LTA feature availability
+    # 1 for TSS 2.5 cars, 3 for TSS 2.0. Send based on whether we're using LTA for lateral control
+    "SETME_X3": 1 if steer_control_type == SteerControlType.angle else 3,
     "PERCENTAGE": 100,
-    "SETME_X64": setme_x64,
+    "TORQUE_WIND_DOWN": torque_wind_down,
     "ANGLE": 0,
     "STEER_ANGLE_CMD": steer_angle,
     "STEER_REQUEST": steer_req,
@@ -27,12 +34,12 @@ def create_lta_steer_command(packer, steer_angle, steer_req, frame, setme_x64):
   return packer.make_can_msg("STEERING_LTA", 0, values)
 
 
-def create_accel_command(packer, accel, pcm_cancel, standstill_req, lead, acc_type, fcw_alert, reverse_acc):
+def create_accel_command(packer, accel, pcm_cancel, standstill_req, lead, acc_type, fcw_alert, distance, reverse_acc):
   # TODO: find the exact canceling bit that does not create a chime
   values = {
-    "ACCEL_CMD": accel,
+    "ACCEL_CMD": 0 if pcm_cancel else accel,
     "ACC_TYPE": acc_type,
-    "DISTANCE": 0,
+    "DISTANCE": distance,
     "MINI_CAR": lead,
     "PERMIT_BRAKING": 1,
     "RELEASE_STANDSTILL": not standstill_req,
@@ -67,18 +74,20 @@ def create_fcw_command(packer, fcw):
   return packer.make_can_msg("PCS_HUD", 0, values)
 
 
-def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud):
+def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, lat_active, stock_lkas_hud,
+                      mads_enabled):
+  lateral_paused = mads_enabled and not lat_active
   values = {
     "TWO_BEEPS": chime,
-    "LDA_ALERT": steer,
-    "RIGHT_LINE": 3 if right_lane_depart else 1 if right_line else 2,
-    "LEFT_LINE": 3 if left_lane_depart else 1 if left_line else 2,
-    "BARRIERS": 1 if enabled else 0,
+    "LDA_ALERT": steer if mads_enabled else 0,
+    "RIGHT_LINE": 0 if not mads_enabled else 2 if lateral_paused else 3 if right_lane_depart else 1 if right_line else 2,
+    "LEFT_LINE": 0 if not mads_enabled else 2 if lateral_paused else 3 if left_lane_depart else 1 if left_line else 2,
+    "BARRIERS": 1 if lat_active else 0,
+    "LKAS_STATUS": 2 if mads_enabled else 1 if lateral_paused else 0,
 
     # static signals
     "SET_ME_X02": 2,
     "SET_ME_X01": 1,
-    "LKAS_STATUS": 1,
     "REPEATED_BEEPS": 0,
     "LANE_SWAY_FLD": 7,
     "LANE_SWAY_BUZZER": 0,
@@ -110,3 +119,14 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
     ]})
 
   return packer.make_can_msg("LKAS_HUD", 0, values)
+
+
+def create_set_bsm_debug_mode(lr_blindspot, enabled):
+  dat = b"\x02\x10\x60\x00\x00\x00\x00" if enabled else b"\x02\x10\x01\x00\x00\x00\x00"
+  dat = lr_blindspot + dat
+
+  return make_can_msg(0x750, dat, 0)
+
+
+def create_bsm_polling_status(lr_blindspot):
+  return make_can_msg(0x750, lr_blindspot + b"\x02\x21\x69\x00\x00\x00\x00", 0)

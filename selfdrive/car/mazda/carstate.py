@@ -3,7 +3,7 @@ from openpilot.common.conversions import Conversions as CV
 from opendbc.can.can_define import CANDefine
 from opendbc.can.parser import CANParser
 from openpilot.selfdrive.car.interfaces import CarStateBase
-from openpilot.selfdrive.car.mazda.values import DBC, LKAS_LIMITS, GEN1
+from openpilot.selfdrive.car.mazda.values import DBC, LKAS_LIMITS, MazdaFlags, BUTTONS
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -18,9 +18,24 @@ class CarState(CarStateBase):
     self.lkas_allowed_speed = False
     self.lkas_disabled = False
 
+    self.prev_distance_button = 0
+    self.distance_button = 0
+
+    self.lkas_enabled = False
+    self.prev_lkas_enabled = False
+
+    self.button_states = {button.event_type: False for button in BUTTONS}
+
   def update(self, cp, cp_cam):
 
     ret = car.CarState.new_message()
+
+    self.prev_distance_button = self.distance_button
+    self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
+
+    self.prev_mads_enabled = self.mads_enabled
+    self.prev_lkas_enabled = self.lkas_enabled
+
     ret.wheelSpeeds = self.get_wheel_speeds(
       cp.vl["WHEEL_SPEEDS"]["FL"],
       cp.vl["WHEEL_SPEEDS"]["FR"],
@@ -32,16 +47,28 @@ class CarState(CarStateBase):
 
     # Match panda speed reading
     speed_kph = cp.vl["ENGINE_DATA"]["SPEED"]
-    ret.standstill = speed_kph < .1
+    ret.standstill = speed_kph <= .1
+
+    self.lkas_enabled = not self.lkas_disabled
 
     can_gear = int(cp.vl["GEAR"]["GEAR"])
     ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
 
+    # Buttons
+    for button in BUTTONS:
+      state = (cp.vl[button.can_addr][button.can_msg] in button.values)
+      if self.button_states[button.event_type] != state:
+        event = car.CarState.ButtonEvent.new_message()
+        event.type = button.event_type
+        event.pressed = state
+        self.button_events.append(event)
+      self.button_states[button.event_type] = state
+
     ret.genericToggle = bool(cp.vl["BLINK_INFO"]["HIGH_BEAMS"])
     ret.leftBlindspot = cp.vl["BSM"]["LEFT_BS_STATUS"] != 0
     ret.rightBlindspot = cp.vl["BSM"]["RIGHT_BS_STATUS"] != 0
-    ret.leftBlinker, ret.rightBlinker = self.update_blinker_from_lamp(40, cp.vl["BLINK_INFO"]["LEFT_BLINK"] == 1,
-                                                                      cp.vl["BLINK_INFO"]["RIGHT_BLINK"] == 1)
+    ret.leftBlinker, ret.rightBlinker = ret.leftBlinkerOn, ret.rightBlinkerOn = self.update_blinker_from_lamp(40, cp.vl["BLINK_INFO"]["LEFT_BLINK"] == 1,
+                                                                                                                  cp.vl["BLINK_INFO"]["RIGHT_BLINK"] == 1)
 
     ret.steeringAngleDeg = cp.vl["STEER"]["STEER_ANGLE"]
     ret.steeringTorque = cp.vl["STEER_TORQUE"]["STEER_TORQUE_SENSOR"]
@@ -116,7 +143,7 @@ class CarState(CarStateBase):
       ("WHEEL_SPEEDS", 100),
     ]
 
-    if CP.carFingerprint in GEN1:
+    if CP.flags & MazdaFlags.GEN1:
       messages += [
         ("ENGINE_DATA", 100),
         ("CRZ_CTRL", 50),
@@ -136,7 +163,7 @@ class CarState(CarStateBase):
   def get_cam_can_parser(CP):
     messages = []
 
-    if CP.carFingerprint in GEN1:
+    if CP.flags & MazdaFlags.GEN1:
       messages += [
         # sig_address, frequency
         ("CAM_LANEINFO", 2),

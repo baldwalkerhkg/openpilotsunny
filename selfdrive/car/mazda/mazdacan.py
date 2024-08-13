@@ -1,7 +1,7 @@
-from openpilot.selfdrive.car.mazda.values import GEN1, Buttons
+from openpilot.selfdrive.car.mazda.values import Buttons, MazdaFlags
 
 
-def create_steering_control(packer, car_fingerprint, frame, apply_steer, lkas):
+def create_steering_control(packer, CP, frame, apply_steer, lkas):
 
   tmp = apply_steer + 2048
 
@@ -45,7 +45,7 @@ def create_steering_control(packer, car_fingerprint, frame, apply_steer, lkas):
   csum = csum % 256
 
   values = {}
-  if car_fingerprint in GEN1:
+  if CP.flags & MazdaFlags.GEN1:
     values = {
       "LKAS_REQUEST": apply_steer,
       "CTR": ctr,
@@ -88,24 +88,26 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 
-def create_button_cmd(packer, car_fingerprint, counter, button):
+def create_button_cmd(packer, CP, counter, button):
 
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
+  inc = int(button == Buttons.SET_PLUS)
+  dec = int(button == Buttons.SET_MINUS)
 
-  if car_fingerprint in GEN1:
+  if CP.flags & MazdaFlags.GEN1:
     values = {
       "CAN_OFF": can,
       "CAN_OFF_INV": (can + 1) % 2,
 
-      "SET_P": 0,
-      "SET_P_INV": 1,
+      "SET_P": inc,
+      "SET_P_INV": (inc + 1) % 2,
 
       "RES": res,
       "RES_INV": (res + 1) % 2,
 
-      "SET_M": 0,
-      "SET_M_INV": 1,
+      "SET_M": dec,
+      "SET_M_INV": (dec + 1) % 2,
 
       "DISTANCE_LESS": 0,
       "DISTANCE_LESS_INV": 1,

@@ -158,7 +158,7 @@ void DeclinePage::showEvent(QShowEvent *event) {
   main_layout->setSpacing(40);
 
   QLabel *text = new QLabel(this);
-  text->setText(tr("You must accept the Terms and Conditions in order to use openpilot."));
+  text->setText(tr("You must accept the Terms and Conditions in order to use sunnypilot."));
   text->setStyleSheet(R"(font-size: 80px; font-weight: 300; margin: 200px;)");
   text->setWordWrap(true);
   main_layout->addWidget(text, 0, Qt::AlignCenter);
@@ -183,7 +183,7 @@ void DeclinePage::showEvent(QShowEvent *event) {
 void OnboardingWindow::updateActiveScreen() {
   if (!accepted_terms) {
     setCurrentIndex(0);
-  } else if (!training_done && !params.getBool("Passive")) {
+  } else if (!training_done) {
     setCurrentIndex(1);
   } else {
     emit onboardingDone();
@@ -199,7 +199,7 @@ OnboardingWindow::OnboardingWindow(QWidget *parent) : QStackedWidget(parent) {
   TermsPage* terms = new TermsPage(this);
   addWidget(terms);
   connect(terms, &TermsPage::acceptedTerms, [=]() {
-    Params().put("HasAcceptedTerms", current_terms_version);
+    params.put("HasAcceptedTerms", current_terms_version);
     accepted_terms = true;
     updateActiveScreen();
   });
@@ -209,7 +209,7 @@ OnboardingWindow::OnboardingWindow(QWidget *parent) : QStackedWidget(parent) {
   addWidget(tr);
   connect(tr, &TrainingGuide::completedTraining, [=]() {
     training_done = true;
-    Params().put("CompletedTrainingVersion", current_training_version);
+    params.put("CompletedTrainingVersion", current_training_version);
     updateActiveScreen();
   });
 

@@ -11,6 +11,7 @@
 #include <string>
 #include <utility>
 
+#include <QApplication>
 #include <QOpenGLBuffer>
 #include <QOffscreenSurface>
 
@@ -31,8 +32,8 @@ const char frame_vertex_shader[] =
   "  vTexCoord = aTexCoord;\n"
   "}\n";
 
-#ifdef QCOM2
 const char frame_fragment_shader[] =
+#ifdef QCOM2
   "#version 300 es\n"
   "#extension GL_OES_EGL_image_external_essl3 : enable\n"
   "precision mediump float;\n"
@@ -45,7 +46,6 @@ const char frame_fragment_shader[] =
   "  colorOut.rgb = pow(colorOut.rgb, vec3(1.0/1.28));\n"
   "}\n";
 #else
-const char frame_fragment_shader[] =
 #ifdef __APPLE__
   "#version 330 core\n"
 #else
@@ -66,12 +66,13 @@ const char frame_fragment_shader[] =
   "}\n";
 #endif
 
-mat4 get_driver_view_transform(int screen_width, int screen_height, int stream_width, int stream_height) {
+mat4 get_driver_view_transform(int screen_width, int screen_height, int stream_width, int stream_height, bool reverse_dm_cam = false) {
   const float driver_view_ratio = 2.0;
   const float yscale = stream_height * driver_view_ratio / stream_width;
   const float xscale = yscale*screen_height/screen_width*stream_width/stream_height;
+  float xscale_invert = (reverse_dm_cam ? -xscale : xscale);
   mat4 transform = (mat4){{
-    xscale,  0.0, 0.0, 0.0,
+    xscale_invert,  0.0, 0.0, 0.0,
     0.0,  yscale, 0.0, 0.0,
     0.0,  0.0, 1.0, 0.0,
     0.0,  0.0, 0.0, 1.0,
@@ -99,12 +100,13 @@ mat4 get_fit_view_transform(float widget_aspect_ratio, float frame_aspect_ratio)
 } // namespace
 
 CameraWidget::CameraWidget(std::string stream_name, VisionStreamType type, bool zoom, QWidget* parent) :
-                          stream_name(stream_name), requested_stream_type(type), zoomed_view(zoom), QOpenGLWidget(parent) {
+                          stream_name(stream_name), active_stream_type(type), requested_stream_type(type), zoomed_view(zoom), QOpenGLWidget(parent) {
   setAttribute(Qt::WA_OpaquePaintEvent);
   qRegisterMetaType<std::set<VisionStreamType>>("availableStreams");
   QObject::connect(this, &CameraWidget::vipcThreadConnected, this, &CameraWidget::vipcConnected, Qt::BlockingQueuedConnection);
   QObject::connect(this, &CameraWidget::vipcThreadFrameReceived, this, &CameraWidget::vipcFrameReceived, Qt::QueuedConnection);
   QObject::connect(this, &CameraWidget::vipcAvailableStreamsUpdated, this, &CameraWidget::availableStreamsUpdated, Qt::QueuedConnection);
+  QObject::connect(QApplication::instance(), &QCoreApplication::aboutToQuit, this, &CameraWidget::stopVipcThread);
 }
 
 CameraWidget::~CameraWidget() {
@@ -190,12 +192,23 @@ void CameraWidget::showEvent(QShowEvent *event) {
 }
 
 void CameraWidget::stopVipcThread() {
+  makeCurrent();
   if (vipc_thread) {
     vipc_thread->requestInterruption();
     vipc_thread->quit();
     vipc_thread->wait();
     vipc_thread = nullptr;
   }
+
+#ifdef QCOM2
+  EGLDisplay egl_display = eglGetCurrentDisplay();
+  assert(egl_display != EGL_NO_DISPLAY);
+  for (auto &pair : egl_images) {
+    eglDestroyImageKHR(egl_display, pair.second);
+    assert(eglGetError() == EGL_SUCCESS);
+  }
+  egl_images.clear();
+#endif
 }
 
 void CameraWidget::availableStreamsUpdated(std::set<VisionStreamType> streams) {
@@ -208,7 +221,7 @@ void CameraWidget::updateFrameMat() {
   if (zoomed_view) {
     if (active_stream_type == VISION_STREAM_DRIVER) {
       if (stream_width > 0 && stream_height > 0) {
-        frame_mat = get_driver_view_transform(w, h, stream_width, stream_height);
+        frame_mat = get_driver_view_transform(w, h, stream_width, stream_height, is_reverse);
       }
     } else {
       // Project point at "infinity" to compute x and y offsets
@@ -326,8 +339,8 @@ void CameraWidget::vipcConnected(VisionIpcClient *vipc_client) {
   stream_stride = vipc_client->buffers[0].stride;
 
 #ifdef QCOM2
-  egl_display = eglGetCurrentDisplay();
-
+  EGLDisplay egl_display = eglGetCurrentDisplay();
+  assert(egl_display != EGL_NO_DISPLAY);
   for (auto &pair : egl_images) {
     eglDestroyImageKHR(egl_display, pair.second);
   }
@@ -418,13 +431,6 @@ void CameraWidget::vipcThread() {
       }
     }
   }
-
-#ifdef QCOM2
-  for (auto &pair : egl_images) {
-    eglDestroyImageKHR(egl_display, pair.second);
-  }
-  egl_images.clear();
-#endif
 }
 
 void CameraWidget::clearFrames() {

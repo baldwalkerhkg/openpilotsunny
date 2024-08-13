@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+import bisect
 import math
 import os
 from enum import IntEnum
-from typing import Dict, Union, Callable, List, Optional
+from collections.abc import Callable
 
 from cereal import log, car
 import cereal.messaging as messaging
 from openpilot.common.conversions import Conversions as CV
+from openpilot.common.git import get_short_branch
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER
-from openpilot.system.version import get_short_branch
 
 AlertSize = log.ControlsState.AlertSize
 AlertStatus = log.ControlsState.AlertStatus
@@ -48,12 +49,12 @@ EVENT_NAME = {v: k for k, v in EventName.schema.enumerants.items()}
 
 class Events:
   def __init__(self):
-    self.events: List[int] = []
-    self.static_events: List[int] = []
-    self.events_prev = dict.fromkeys(EVENTS.keys(), 0)
+    self.events: list[int] = []
+    self.static_events: list[int] = []
+    self.event_counters = dict.fromkeys(EVENTS.keys(), 0)
 
   @property
-  def names(self) -> List[int]:
+  def names(self) -> list[int]:
     return self.events
 
   def __len__(self) -> int:
@@ -61,17 +62,17 @@ class Events:
 
   def add(self, event_name: int, static: bool=False) -> None:
     if static:
-      self.static_events.append(event_name)
-    self.events.append(event_name)
+      bisect.insort(self.static_events, event_name)
+    bisect.insort(self.events, event_name)
 
   def clear(self) -> None:
-    self.events_prev = {k: (v + 1 if k in self.events else 0) for k, v in self.events_prev.items()}
+    self.event_counters = {k: (v + 1 if k in self.events else 0) for k, v in self.event_counters.items()}
     self.events = self.static_events.copy()
 
   def contains(self, event_type: str) -> bool:
     return any(event_type in EVENTS.get(e, {}) for e in self.events)
 
-  def create_alerts(self, event_types: List[str], callback_args=None):
+  def create_alerts(self, event_types: list[str], callback_args=None):
     if callback_args is None:
       callback_args = []
 
@@ -84,7 +85,7 @@ class Events:
           if not isinstance(alert, Alert):
             alert = alert(*callback_args)
 
-          if DT_CTRL * (self.events_prev[e] + 1) >= alert.creation_delay:
+          if DT_CTRL * (self.event_counters[e] + 1) >= alert.creation_delay:
             alert.alert_type = f"{EVENT_NAME[e]}/{et}"
             alert.event_type = et
             ret.append(alert)
@@ -92,7 +93,7 @@ class Events:
 
   def add_from_msg(self, events):
     for e in events:
-      self.events.append(e.name.raw)
+      bisect.insort(self.events, e.name.raw)
 
   def to_msg(self):
     ret = []
@@ -132,7 +133,7 @@ class Alert:
     self.creation_delay = creation_delay
 
     self.alert_type = ""
-    self.event_type: Optional[str] = None
+    self.event_type: str | None = None
 
   def __str__(self) -> str:
     return f"{self.alert_text_1}/{self.alert_text_2} {self.priority} {self.visual_alert} {self.audible_alert}"
@@ -224,7 +225,7 @@ def user_soft_disable_alert(alert_text_2: str) -> AlertCallbackType:
   return func
 
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
-  branch = get_short_branch("")  # Ensure get_short_branch is cached to avoid lags on startup
+  branch = get_short_branch()  # Ensure get_short_branch is cached to avoid lags on startup
   if "REPLAY" in os.environ:
     branch = "replay"
 
@@ -251,12 +252,25 @@ def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messag
     Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2)
 
 
-def no_gps_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
-  return Alert(
-    "Poor GPS reception",
-    "Hardware malfunctioning if sky is visible",
-    AlertStatus.normal, AlertSize.mid,
-    Priority.LOWER, VisualAlert.none, AudibleAlert.none, .2, creation_delay=300.)
+def torque_nn_load_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
+  model_name = CP.lateralTuning.torque.nnModelName
+  if model_name in ("", "mock"):
+    return Alert(
+      "NN Lateral Controller Not Loaded",
+      '⚙️ -> "sunnypilot" for more details',
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 6.0)
+  else:
+    fuzzy = CP.lateralTuning.torque.nnModelFuzzyMatch
+    alert_text_2 = '⚙️ -> "sunnypilot" for more details [Match = Fuzzy]' if fuzzy else ""
+    alert_status = AlertStatus.userPrompt if fuzzy else AlertStatus.normal
+    alert_size = AlertSize.mid if fuzzy else AlertSize.small
+    audible_alert = AudibleAlert.prompt if fuzzy else AudibleAlert.none
+    return Alert(
+      "NN Lateral Controller Loaded",
+      alert_text_2,
+      alert_status, alert_size,
+      Priority.LOW, VisualAlert.none, audible_alert, 6.0)
 
 # *** debug alerts ***
 
@@ -332,7 +346,7 @@ def joystick_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster,
   return NormalPermanentAlert("Joystick Mode", vals)
 
 def speed_limit_adjust_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
-  speedLimit = sm['longitudinalPlan'].speedLimit
+  speedLimit = sm['longitudinalPlanSP'].speedLimit
   speed = round(speedLimit * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))
   message = f'Adjusting to {speed} {"km/h" if metric else "mph"} speed limit'
   return Alert(
@@ -343,10 +357,11 @@ def speed_limit_adjust_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.
 
 
 
-EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
+EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # ********** events with no alerts **********
 
   EventName.stockFcw: {},
+  EventName.actuatorsApiUnavailable: {},
 
   # ********** events only containing alerts displayed in all states **********
 
@@ -403,7 +418,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   # See https://github.com/commaai/openpilot/wiki/Fingerprinting for more information
   EventName.carUnrecognized: {
     ET.PERMANENT: NormalPermanentAlert("Dashcam Mode",
-                                       "Car Unrecognized",
+                                       '⚙️ -> "Vehicle" to select your car',
                                        priority=Priority.LOWEST),
   },
 
@@ -443,7 +458,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.preDriverDistracted: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "Pay Attention",
       "",
       AlertStatus.normal, AlertSize.small,
@@ -451,7 +466,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.promptDriverDistracted: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "Pay Attention",
       "Driver Distracted",
       AlertStatus.userPrompt, AlertSize.mid,
@@ -459,7 +474,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.driverDistracted: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "DISENGAGE IMMEDIATELY",
       "Driver Distracted",
       AlertStatus.critical, AlertSize.full,
@@ -467,7 +482,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.preDriverUnresponsive: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "Touch Steering Wheel: No Face Detected",
       "",
       AlertStatus.normal, AlertSize.small,
@@ -475,7 +490,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.promptDriverUnresponsive: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "Touch Steering Wheel",
       "Driver Unresponsive",
       AlertStatus.userPrompt, AlertSize.mid,
@@ -483,7 +498,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.driverUnresponsive: {
-    ET.WARNING: Alert(
+    ET.PERMANENT: Alert(
       "DISENGAGE IMMEDIATELY",
       "Driver Unresponsive",
       AlertStatus.critical, AlertSize.full,
@@ -523,7 +538,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       "Press Resume to Exit Standstill",
       "",
       AlertStatus.userPrompt, AlertSize.small,
-      Priority.MID, VisualAlert.none, AudibleAlert.none, .2),
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
   },
 
   EventName.belowSteerSpeed: {
@@ -554,12 +569,44 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
 
+  EventName.laneChangeRoadEdge: {
+    ET.WARNING: Alert(
+      "Lane Change Unavailable: Road Edge",
+      "",
+      AlertStatus.userPrompt, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
   EventName.laneChange: {
     ET.WARNING: Alert(
       "Changing Lanes",
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
+  },
+
+  EventName.manualSteeringRequired: {
+    ET.WARNING: Alert(
+      "Automatic Lane Centering is OFF",
+      "Manual Steering Required",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.disengage, 1.),
+  },
+
+  EventName.manualLongitudinalRequired: {
+    ET.WARNING: Alert(
+      "Smart/Adaptive Cruise Control is OFF",
+      "Manual Gas/Brakes Required",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.),
+  },
+
+  EventName.cruiseEngageBlocked: {
+    ET.WARNING: Alert(
+      "openpilot Unavailable",
+      "Pedal Pressed During Cruise Engage",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.brakePressed, AudibleAlert.refuse, 3.),
   },
 
   EventName.steerSaturated: {
@@ -589,9 +636,6 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   # Unused
-  EventName.gpsMalfunction: {
-    ET.PERMANENT: NormalPermanentAlert("GPS Malfunction", "Likely Hardware Issue"),
-  },
 
   EventName.locationdTemporaryError: {
     ET.NO_ENTRY: NoEntryAlert("locationd Temporary Error"),
@@ -625,14 +669,38 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
 
   EventName.speedLimitActive: {
     ET.WARNING: Alert(
-      "Cruise set to speed limit",
+      "Set speed changed to match posted speed limit",
       "",
       AlertStatus.normal, AlertSize.small,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, 2.),
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 3.),
   },
 
   EventName.speedLimitValueChange: {
     ET.WARNING: speed_limit_adjust_alert,
+  },
+
+  EventName.e2eLongStart: {
+    ET.PERMANENT: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.promptStarting, 1.5),
+  },
+
+  EventName.speedLimitPreActive: {
+    ET.WARNING: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.promptSingleLow, .45),
+  },
+
+  EventName.speedLimitConfirmed: {
+    ET.WARNING: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.promptSingleHigh, .45),
   },
 
   # ********** events that affect controls state transitions **********
@@ -643,6 +711,14 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
 
   EventName.buttonEnable: {
     ET.ENABLE: EngagementAlert(AudibleAlert.engage),
+  },
+
+  EventName.silentButtonEnable: {
+    ET.ENABLE: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.none, .2, 0., 0.),
   },
 
   EventName.pcmDisable: {
@@ -659,6 +735,15 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("Brake Hold Active"),
   },
 
+  EventName.silentBrakeHold: {
+    ET.USER_DISABLE: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.none, .2, 0., 0.),
+    ET.NO_ENTRY: NoEntryAlert("Brake Hold Active"),
+  },
+
   EventName.parkBrake: {
     ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
     ET.NO_ENTRY: NoEntryAlert("Parking Brake Engaged"),
@@ -667,6 +752,16 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.pedalPressed: {
     ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
     ET.NO_ENTRY: NoEntryAlert("Pedal Pressed",
+                              visual_alert=VisualAlert.brakePressed),
+  },
+
+  EventName.silentPedalPressed: {
+    ET.USER_DISABLE: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.none, .2),
+    ET.NO_ENTRY: NoEntryAlert("Pedal Pressed During Attempt",
                               visual_alert=VisualAlert.brakePressed),
   },
 
@@ -730,7 +825,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.sensorDataInvalid: {
     ET.PERMANENT: Alert(
       "Sensor Data Invalid",
-      "Ensure device is mounted securely",
+      "Possible Hardware Issue",
       AlertStatus.normal, AlertSize.mid,
       Priority.LOWER, VisualAlert.none, AudibleAlert.none, .2, creation_delay=1.),
     ET.NO_ENTRY: NoEntryAlert("Sensor Data Invalid"),
@@ -738,7 +833,11 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   EventName.noGps: {
-    ET.PERMANENT: no_gps_alert,
+    ET.PERMANENT: Alert(
+      "Poor GPS reception",
+      "Ensure device has a clear view of the sky",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOWER, VisualAlert.none, AudibleAlert.none, .2, creation_delay=600.)
   },
 
   EventName.soundsUnavailable: {
@@ -759,6 +858,19 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.wrongGear: {
     ET.SOFT_DISABLE: user_soft_disable_alert("Gear not D"),
     ET.NO_ENTRY: NoEntryAlert("Gear not D"),
+  },
+
+  EventName.silentWrongGear: {
+    ET.SOFT_DISABLE: Alert(
+      "Gear not D",
+      "openpilot Unavailable",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 0., 2., 3.),
+    ET.NO_ENTRY: Alert(
+      "Gear not D",
+      "openpilot Unavailable",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 0., 2., 3.),
   },
 
   # This alert is thrown when the calibration angles are outside of the acceptable range.
@@ -809,12 +921,12 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   # is thrown. This can mean a service crashed, did not broadcast a message for
   # ten times the regular interval, or the average interval is more than 10% too high.
   EventName.commIssue: {
-    ET.SOFT_DISABLE: soft_disable_alert("Communication Issue between Processes"),
+    ET.SOFT_DISABLE: soft_disable_alert("Communication Issue Between Processes"),
     ET.NO_ENTRY: comm_issue_alert,
   },
   EventName.commIssueAvgFreq: {
-    ET.SOFT_DISABLE: soft_disable_alert("Low Communication Rate between Processes"),
-    ET.NO_ENTRY: NoEntryAlert("Low Communication Rate between Processes"),
+    ET.SOFT_DISABLE: soft_disable_alert("Low Communication Rate Between Processes"),
+    ET.NO_ENTRY: NoEntryAlert("Low Communication Rate Between Processes"),
   },
 
   EventName.controlsdLagging: {
@@ -877,9 +989,19 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("Cruise Fault: Restart the Car"),
   },
 
+  EventName.espActive: {
+    ET.SOFT_DISABLE: soft_disable_alert("Electronic Stability Control Active"),
+    ET.NO_ENTRY: NoEntryAlert("Electronic Stability Control Active"),
+  },
+
   EventName.controlsMismatch: {
     ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Controls Mismatch"),
     ET.NO_ENTRY: NoEntryAlert("Controls Mismatch"),
+  },
+
+  EventName.controlsMismatchLong: {
+    ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Controls Mismatch\nLongitudinal"),
+    ET.NO_ENTRY: NoEntryAlert("Controls Mismatch\nLongitudinal"),
   },
 
   EventName.roadCameraError: {
@@ -948,6 +1070,15 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("Reverse Gear"),
   },
 
+  EventName.spReverseGear: {
+    ET.PERMANENT: Alert(
+      "Reverse\nGear",
+      "",
+      AlertStatus.normal, AlertSize.full,
+      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
+    ET.NO_ENTRY: NoEntryAlert("Reverse Gear"),
+  },
+
   # On cars that use stock ACC the car can decide to cancel ACC for various reasons.
   # When this happens we can no long control the car so the user needs to be warned immediately.
   EventName.cruiseDisabled: {
@@ -957,7 +1088,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   # For planning the trajectory Model Predictive Control (MPC) is used. This is
   # an optimization algorithm that is not guaranteed to find a feasible solution.
   # If no solution is found or the solution has a very high cost this alert is thrown.
-  EventName.plannerError: {
+  EventName.plannerErrorDEPRECATED: {
     ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Planner Solution Error"),
     ET.NO_ENTRY: NoEntryAlert("Planner Solution Error"),
   },
@@ -1006,37 +1137,40 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("Vehicle Sensors Calibrating"),
   },
 
+  EventName.torqueNNLoad: {
+    ET.PERMANENT: torque_nn_load_alert,
+  },
+
+  EventName.hyundaiRadarTracksAvailable: {
+    ET.PERMANENT: NormalPermanentAlert("Radar tracks available. Restart the car to initialize")
+  }
 }
 
 
 if __name__ == '__main__':
   # print all alerts by type and priority
-  from cereal.services import service_list
-  from collections import defaultdict, OrderedDict
+  from cereal.services import SERVICE_LIST
+  from collections import defaultdict
 
   event_names = {v: k for k, v in EventName.schema.enumerants.items()}
-  alerts_by_type: Dict[str, Dict[int, List[str]]] = defaultdict(lambda: defaultdict(list))
+  alerts_by_type: dict[str, dict[Priority, list[str]]] = defaultdict(lambda: defaultdict(list))
 
   CP = car.CarParams.new_message()
   CS = car.CarState.new_message()
-  sm = messaging.SubMaster(list(service_list.keys()))
+  sm = messaging.SubMaster(list(SERVICE_LIST.keys()))
 
   for i, alerts in EVENTS.items():
     for et, alert in alerts.items():
       if callable(alert):
         alert = alert(CP, CS, sm, False, 1)
-      priority = alert.priority
-      alerts_by_type[et][priority].append(event_names[i])
+      alerts_by_type[et][alert.priority].append(event_names[i])
 
-  all_alerts = {}
+  all_alerts: dict[str, list[tuple[Priority, list[str]]]] = {}
   for et, priority_alerts in alerts_by_type.items():
-    all_alerts[et] = OrderedDict([
-      (str(priority), l)
-      for priority, l in sorted(priority_alerts.items(), key=lambda x: -int(x[0]))
-    ])
+    all_alerts[et] = sorted(priority_alerts.items(), key=lambda x: x[0], reverse=True)
 
   for status, evs in sorted(all_alerts.items(), key=lambda x: x[0]):
     print(f"**** {status} ****")
-    for p, alert_list in evs.items():
-      print(f"  {p}:")
+    for p, alert_list in evs:
+      print(f"  {repr(p)}:")
       print("   ", ', '.join(alert_list), "\n")

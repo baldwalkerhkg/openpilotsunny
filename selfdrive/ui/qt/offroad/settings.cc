@@ -1,5 +1,3 @@
-#include "selfdrive/ui/qt/offroad/settings.h"
-
 #include <cassert>
 #include <cmath>
 #include <string>
@@ -7,31 +5,28 @@
 #include <vector>
 
 #include <QDebug>
-#include <QFile>
 
-#include "selfdrive/ui/qt/network/networking.h"
-
-#include "common/params.h"
 #include "common/watchdog.h"
 #include "common/util.h"
-#include "system/hardware/hw.h"
-#include "selfdrive/ui/qt/widgets/controls.h"
-#include "selfdrive/ui/qt/widgets/input.h"
+#include "selfdrive/ui/qt/network/networking.h"
+#include "selfdrive/ui/qt/offroad/settings.h"
+#include "selfdrive/ui/qt/qt_window.h"
+#include "selfdrive/ui/qt/widgets/prime.h"
 #include "selfdrive/ui/qt/widgets/scrollview.h"
 #include "selfdrive/ui/qt/widgets/ssh_keys.h"
-#include "selfdrive/ui/qt/widgets/toggle.h"
-#include "selfdrive/ui/ui.h"
-#include "selfdrive/ui/qt/util.h"
-#include "selfdrive/ui/qt/qt_window.h"
-#include "selfdrive/ui/qt/widgets/input.h"
+#ifdef SUNNYPILOT
+#include "selfdrive/ui/sunnypilot/sunnypilot_main.h"
+#endif 
 
 TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
+  RETURN_IF_SUNNYPILOT
+
   // param, title, desc, icon
   std::vector<std::tuple<QString, QString, QString, QString>> toggle_defs{
     {
       "OpenpilotEnabledToggle",
-      tr("Enable openpilot"),
-      tr("Use the openpilot system for adaptive cruise control and lane keep driver assistance. Your attention is required at all times to use this feature. Changing this setting takes effect when the car is powered off."),
+      tr("Enable sunnypilot"),
+      tr("Use the sunnypilot system for adaptive cruise control and lane keep driver assistance. Your attention is required at all times to use this feature. Changing this setting takes effect when the car is powered off."),
       "../assets/offroad/icon_openpilot.png",
     },
     {
@@ -62,6 +57,12 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "../assets/offroad/icon_warning.png",
     },
     {
+      "AlwaysOnDM",
+      tr("Always-On Driver Monitoring"),
+      tr("Enable driver monitoring even when openpilot is not engaged."),
+      "../assets/offroad/icon_monitoring.png",
+    },
+    {
       "RecordFront",
       tr("Record and Upload Driver Camera"),
       tr("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
@@ -73,29 +74,20 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       tr("Display speed in km/h instead of mph."),
       "../assets/offroad/icon_metric.png",
     },
-#ifdef ENABLE_MAPS
-    {
-      "NavSettingTime24h",
-      tr("Show ETA in 24h Format"),
-      tr("Use 24h format instead of am/pm"),
-      "../assets/offroad/icon_metric.png",
-    },
-    {
-      "NavSettingLeftSide",
-      tr("Show Map on Left Side of UI"),
-      tr("Show map on left side when in split screen view."),
-      "../assets/offroad/icon_road.png",
-    },
-#endif
   };
 
 
   std::vector<QString> longi_button_texts{tr("Aggressive"), tr("Standard"), tr("Relaxed")};
   long_personality_setting = new ButtonParamControl("LongitudinalPersonality", tr("Driving Personality"),
                                           tr("Standard is recommended. In aggressive mode, openpilot will follow lead cars closer and be more aggressive with the gas and brake. "
-                                             "In relaxed mode openpilot will stay further away from lead cars."),
+                                             "In relaxed mode openpilot will stay further away from lead cars. On supported cars, you can cycle through these personalities with "
+                                             "your steering wheel distance button."),
                                           "../assets/offroad/icon_speed_limit.png",
                                           longi_button_texts);
+
+  // set up uiState update for personality setting
+  QObject::connect(uiState(), &UIState::uiUpdate, this, &TogglesPanel::updateState);
+
   for (auto &[param, title, desc, icon] : toggle_defs) {
     auto toggle = new ParamControl(param, title, desc, icon, this);
 
@@ -121,6 +113,18 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
   });
 }
 
+void TogglesPanel::updateState(const UIState &s) {
+  const SubMaster &sm = *(s.sm);
+
+  if (sm.updated("controlsState")) {
+    auto personality = sm["controlsState"].getControlsState().getPersonality();
+    if (personality != s.scene.personality && s.scene.started && isVisible()) {
+      long_personality_setting->setCheckedButton(static_cast<int>(personality));
+    }
+    uiState()->scene.personality = personality;
+  }
+}
+
 void TogglesPanel::expandToggleDescription(const QString &param) {
   toggles[param.toStdString()]->showDescription();
 }
@@ -136,21 +140,14 @@ void TogglesPanel::updateToggles() {
                                           "<h4>%2</h4><br>"
                                           "%3<br>"
                                           "<h4>%4</h4><br>"
-                                          "%5<br>"
-                                          "<h4>%6</h4><br>"
-                                          "%7")
+                                          "%5<br>")
                                   .arg(tr("openpilot defaults to driving in <b>chill mode</b>. Experimental mode enables <b>alpha-level features</b> that aren't ready for chill mode. Experimental features are listed below:"))
                                   .arg(tr("End-to-End Longitudinal Control"))
                                   .arg(tr("Let the driving model control the gas and brakes. openpilot will drive as it thinks a human would, including stopping for red lights and stop signs. "
                                           "Since the driving model decides the speed to drive, the set speed will only act as an upper bound. This is an alpha quality feature; "
                                           "mistakes should be expected."))
-                                  .arg(tr("Navigate on openpilot"))
-                                  .arg(tr("When navigation has a destination, openpilot will input the map information into the model. This provides useful context for the model and allows openpilot to keep left or right "
-                                          "appropriately at forks/exits. Lane change behavior is unchanged and still activated by the driver. This is an alpha quality feature; mistakes should be expected, particularly around "
-                                          "exits and forks. These mistakes can include unintended laneline crossings, late exit taking, driving towards dividing barriers in the gore areas, etc."))
                                   .arg(tr("New Driving Visualization"))
-                                  .arg(tr("The driving visualization will transition to the road-facing wide-angle camera at low speeds to better show some turns. The Experimental mode logo will also be shown in the top right corner. "
-                                          "When a navigation destination is set and the driving model is using it as input, the driving path on the map will turn green."));
+                                  .arg(tr("The driving visualization will transition to the road-facing wide-angle camera at low speeds to better show some turns. The Experimental mode logo will also be shown in the top right corner."));
 
   const bool is_release = params.getBool("IsReleaseBranch");
   auto cp_bytes = params.get("CarParamsPersistent");
@@ -199,10 +196,14 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   setSpacing(50);
   addItem(new LabelControl(tr("Dongle ID"), getDongleId().value_or(tr("N/A"))));
   addItem(new LabelControl(tr("Serial"), params.get("HardwareSerial").c_str()));
-  QFile f("/data/otp/otp.conf");
-  f.open(QIODevice::ReadOnly | QIODevice::Text);
-  QString pin = f.readAll();
-  addItem(new LabelControl(tr("Fleet Manager PIN"), pin));
+
+  pair_device = new ButtonControl(tr("Pair Device"), tr("PAIR"),
+                                  tr("Pair your device with comma connect (connect.comma.ai) and claim your comma prime offer."));
+  connect(pair_device, &ButtonControl::clicked, [=]() {
+    PairingPopup popup(this);
+    popup.exec();
+  });
+  addItem(pair_device);
 
   // offroad-only buttons
 
@@ -221,15 +222,13 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   });
   addItem(resetCalibBtn);
 
-  if (!params.getBool("Passive")) {
-    auto retrainingBtn = new ButtonControl(tr("Review Training Guide"), tr("REVIEW"), tr("Review the rules, features, and limitations of openpilot"));
-    connect(retrainingBtn, &ButtonControl::clicked, [=]() {
-      if (ConfirmationDialog::confirm(tr("Are you sure you want to review the training guide?"), tr("Review"), this)) {
-        emit reviewTrainingGuide();
-      }
-    });
-    addItem(retrainingBtn);
-  }
+  auto retrainingBtn = new ButtonControl(tr("Review Training Guide"), tr("REVIEW"), tr("Review the rules, features, and limitations of openpilot"));
+  connect(retrainingBtn, &ButtonControl::clicked, [=]() {
+    if (ConfirmationDialog::confirm(tr("Are you sure you want to review the training guide?"), tr("Review"), this)) {
+      emit reviewTrainingGuide();
+    }
+  });
+  addItem(retrainingBtn);
 
   if (Hardware::TICI()) {
     auto regulatoryBtn = new ButtonControl(tr("Regulatory"), tr("VIEW"), "");
@@ -253,14 +252,22 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   });
   addItem(translateBtn);
 
-  QObject::connect(uiState(), &UIState::offroadTransition, [=](bool offroad) {
-    for (auto btn : findChildren<ButtonControl *>()) {
-      btn->setEnabled(offroad);
-    }
+  QObject::connect(uiState(), &UIState::primeTypeChanged, [this] (PrimeType type) {
+    pair_device->setVisible(type == PrimeType::UNPAIRED);
   });
 
+#ifndef SUNNYPILOT
+  QObject::connect(uiState(), &UIState::offroadTransition, [=](bool offroad) {
+    for (auto btn : findChildren<ButtonControl *>()) {
+      if (btn != pair_device) {
+        btn->setEnabled(offroad);
+      }
+    }
+  });
+#endif
+
   // power buttons
-  QHBoxLayout *power_layout = new QHBoxLayout();
+  power_layout = new QHBoxLayout();
   power_layout->setSpacing(30);
 
   QPushButton *reboot_btn = new QPushButton(tr("Reboot"));
@@ -283,13 +290,14 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
     #poweroff_btn { height: 120px; border-radius: 15px; background-color: #E22C2C; }
     #poweroff_btn:pressed { background-color: #FF2424; }
   )");
+  RETURN_IF_SUNNYPILOT
   addItem(power_layout);
 }
 
 void DevicePanel::updateCalibDescription() {
   QString desc =
-      tr("openpilot requires the device to be mounted within 4° left or right and "
-         "within 5° up or 8° down. openpilot is continuously calibrating, resetting is rarely required.");
+      tr("sunnypilot requires the device to be mounted within 4° left or right and "
+         "within 5° up or 9° down. sunnypilot is continuously calibrating, resetting is rarely required.");
   std::string calib_bytes = params.get("CalibrationParams");
   if (!calib_bytes.empty()) {
     try {
@@ -336,6 +344,11 @@ void DevicePanel::poweroff() {
   }
 }
 
+void DevicePanel::showEvent(QShowEvent *event) {
+  pair_device->setVisible(uiState()->primeType() == PrimeType::UNPAIRED);
+  ListWidget::showEvent(event);
+}
+
 void SettingsWindow::showEvent(QShowEvent *event) {
   setCurrentPanel(0);
 }
@@ -349,11 +362,11 @@ void SettingsWindow::setCurrentPanel(int index, const QString &param) {
 }
 
 SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
+  RETURN_IF_SUNNYPILOT
 
   // setup two main layouts
   sidebar_widget = new QWidget;
   QVBoxLayout *sidebar_layout = new QVBoxLayout(sidebar_widget);
-  sidebar_layout->setMargin(0);
   panel_widget = new QStackedWidget();
 
   // close button
@@ -362,7 +375,6 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
     QPushButton {
       font-size: 140px;
       padding-bottom: 20px;
-      border 1px grey solid;
       border-radius: 100px;
       background-color: #292929;
       font-weight: 400;
